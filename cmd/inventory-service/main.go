@@ -10,6 +10,7 @@ import (
 	"inventory-service/internal/biz"
 	"inventory-service/internal/data"
 	"inventory-service/internal/server"
+	"inventory-service/internal/service"
 
 	"github.com/go-kratos/kratos/v2"
 	"github.com/go-kratos/kratos/v2/transport"
@@ -31,8 +32,10 @@ func main() {
 
 	repo := data.NewInventoryRepo(db)
 	uc := biz.NewInventoryUsecase(repo)
-	httpSrv := server.NewHTTPServer(server.HTTPConfig{Addr: getenv("HTTP_ADDR", ":8000")}, uc)
-	app := kratos.New(kratos.Name("inventory-service"), kratos.Server([]transport.Server{httpSrv}...))
+	inventorySvc := service.NewInventoryService(uc)
+	httpSrv := server.NewHTTPServer(server.HTTPConfig{Addr: getenv("HTTP_ADDR", ":8000")}, inventorySvc)
+	grpcSrv := server.NewGRPCServer(server.GRPCConfig{Addr: getenv("GRPC_ADDR", ":9000")}, inventorySvc)
+	app := kratos.New(kratos.Name("inventory-service"), kratos.Server([]transport.Server{httpSrv, grpcSrv}...))
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}

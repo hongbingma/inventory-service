@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package inventory.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "inventory-service/api/inventory/v1;v1";
+
+service Inventory {
+  rpc CreateOrReplaceInventory(CreateOrReplaceInventoryRequest) returns (InventoryReply) {
+    option (google.api.http) = {
+      post: "/v1/inventories"
+      body: "*"
+    };
+  }
+
+  rpc DeductInventory(DeductInventoryRequest) returns (InventoryOperationReply) {
+    option (google.api.http) = {
+      post: "/v1/inventories/deduct"
+      body: "*"
+    };
+  }
+
+  rpc IncreaseInventory(IncreaseInventoryRequest) returns (InventoryOperationReply) {
+    option (google.api.http) = {
+      post: "/v1/inventories/increase"
+      body: "*"
+      additional_bindings: {
+        post: "/v1/inventories/release"
+        body: "*"
+      }
+    };
+  }
+
+  rpc ConfirmInventory(ConfirmInventoryRequest) returns (InventoryOperationReply) {
+    option (google.api.http) = {
+      post: "/v1/inventories/confirm"
+      body: "*"
+    };
+  }
+
+  rpc EditInventory(EditInventoryRequest) returns (InventoryReply) {
+    option (google.api.http) = {
+      put: "/v1/inventories/{sku_id}"
+      body: "*"
+    };
+  }
+
+  rpc GetInventory(GetInventoryRequest) returns (InventoryReply) {
+    option (google.api.http) = {
+      get: "/v1/inventories/{sku_id}"
+    };
+  }
+}
+
+message CreateOrReplaceInventoryRequest {
+  int64 sku_id = 1 [json_name = "sku_id"];
+  int64 total = 2;
+}
+
+message DeductInventoryRequest {
+  string request_id = 1 [json_name = "request_id"];
+  int64 sku_id = 2 [json_name = "sku_id"];
+  int64 quantity = 3;
+}
+
+message IncreaseInventoryRequest {
+  string request_id = 1 [json_name = "request_id"];
+  string deduction_request_id = 2 [json_name = "deduction_request_id"];
+}
+
+message ConfirmInventoryRequest {
+  string request_id = 1 [json_name = "request_id"];
+  string deduction_request_id = 2 [json_name = "deduction_request_id"];
+}
+
+message EditInventoryRequest {
+  int64 sku_id = 1 [json_name = "sku_id"];
+  int64 total = 2;
+  int64 expected_version = 3 [json_name = "expected_version"];
+}
+
+message GetInventoryRequest {
+  int64 sku_id = 1 [json_name = "sku_id"];
+}
+
+message InventoryDTO {
+  int64 sku_id = 1 [json_name = "sku_id"];
+  int64 total = 2;
+  int64 available = 3;
+  int64 locked = 4;
+  int64 sold = 5;
+  int64 version = 6;
+}
+
+message DeductionDTO {
+  string request_id = 1 [json_name = "request_id"];
+  int64 sku_id = 2 [json_name = "sku_id"];
+  int64 quantity = 3;
+  string status = 4;
+}
+
+message InventoryReply {
+  InventoryDTO inventory = 1;
+}
+
+message InventoryOperationReply {
+  InventoryDTO inventory = 1;
+  DeductionDTO deduction = 2;
+}

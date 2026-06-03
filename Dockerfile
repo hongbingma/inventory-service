@@ -9,5 +9,5 @@ FROM alpine:3.22
 RUN adduser -D -H appuser
 USER appuser
 COPY --from=build /out/inventory-service /inventory-service
-EXPOSE 8000
+EXPOSE 8000 9000
 ENTRYPOINT ["/inventory-service"]

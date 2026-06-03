@@ -16,11 +16,11 @@ WHERE sku_id = $1;
 
 -- name: DeductInventory :one
 UPDATE inventories
-SET available = available - $2,
-    locked = locked + $2,
+SET available = available - sqlc.arg(quantity),
+    locked = locked + sqlc.arg(quantity),
     version = version + 1,
     updated_at = now()
-WHERE sku_id = $1 AND available >= $2
+WHERE sku_id = $1 AND available >= sqlc.arg(quantity)
 RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at;
 
 -- name: InsertDeduction :one
@@ -41,11 +41,11 @@ FOR UPDATE;
 
 -- name: ReleaseInventory :one
 UPDATE inventories
-SET available = available + $2,
-    locked = locked - $2,
+SET available = available + sqlc.arg(quantity),
+    locked = locked - sqlc.arg(quantity),
     version = version + 1,
     updated_at = now()
-WHERE sku_id = $1 AND locked >= $2
+WHERE sku_id = $1 AND locked >= sqlc.arg(quantity)
 RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at;
 
 -- name: MarkDeductionReleased :one
@@ -56,11 +56,11 @@ RETURNING id, request_id, sku_id, quantity, status, release_request_id, confirm_
 
 -- name: ConfirmInventory :one
 UPDATE inventories
-SET locked = locked - $2,
-    sold = sold + $2,
+SET locked = locked - sqlc.arg(quantity),
+    sold = sold + sqlc.arg(quantity),
     version = version + 1,
     updated_at = now()
-WHERE sku_id = $1 AND locked >= $2
+WHERE sku_id = $1 AND locked >= sqlc.arg(quantity)
 RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at;
 
 -- name: MarkDeductionConfirmed :one
