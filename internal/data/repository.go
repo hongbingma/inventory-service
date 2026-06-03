@@ -12,11 +12,15 @@ import (
 )
 
 type InventoryRepo struct {
-	db *sql.DB
-	q  *sqlc.Queries
+	db      *sql.DB
+	q       *sqlc.Queries
+	buckets *RedisBucketStore
 }
 
-func NewInventoryRepo(db *sql.DB) *InventoryRepo { return &InventoryRepo{db: db, q: sqlc.New(db)} }
+func NewInventoryRepo(db *sql.DB) *InventoryRepo { return NewInventoryRepoWithRedis(db, nil) }
+func NewInventoryRepoWithRedis(db *sql.DB, buckets *RedisBucketStore) *InventoryRepo {
+	return &InventoryRepo{db: db, q: sqlc.New(db), buckets: buckets}
+}
 
 func (r *InventoryRepo) CreateOrReplace(ctx context.Context, skuID, total int64) (biz.Inventory, error) {
 	inv, err := r.q.CreateInventory(ctx, sqlc.CreateInventoryParams{SkuID: skuID, Total: total})
@@ -49,6 +53,16 @@ func (r *InventoryRepo) Deduct(ctx context.Context, requestID string, skuID, qua
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+
+		if r.buckets != nil {
+			if inv, ded, ok, err := r.deductFromRedisBucket(ctx, q, requestID, skuID, quantity); ok || err != nil {
+				if err != nil {
+					return err
+				}
+				outInv, outDed = inv, ded
+				return nil
+			}
 		}
 
 		inv, err := q.DeductInventory(ctx, sqlc.DeductInventoryParams{SkuID: skuID, Quantity: quantity})
@@ -101,6 +115,25 @@ func (r *InventoryRepo) Release(ctx context.Context, releaseRequestID, deduction
 		if ded.Status != "LOCKED" {
 			return biz.ErrInvalidState
 		}
+		if ded.BucketKey.Valid {
+			if r.buckets != nil {
+				_ = r.buckets.ReturnBucketStock(ctx, ded.BucketKey.String, ded.Quantity)
+			} else {
+				if _, err := q.ReleaseLockedInventory(ctx, sqlc.ReleaseLockedInventoryParams{SkuID: ded.SkuID, Quantity: ded.Quantity}); err != nil {
+					return err
+				}
+			}
+			ded, err = q.MarkDeductionReleased(ctx, sqlc.MarkDeductionReleasedParams{RequestID: deductionRequestID, ReleaseRequestID: sql.NullString{String: releaseRequestID, Valid: true}})
+			if err != nil {
+				return err
+			}
+			inv, err := q.GetInventory(ctx, ded.SkuID)
+			if err != nil {
+				return err
+			}
+			outInv, outDed = toBizInventory(inv), toBizDeduction(ded)
+			return nil
+		}
 		inv, err := q.ReleaseInventory(ctx, sqlc.ReleaseInventoryParams{SkuID: ded.SkuID, Quantity: ded.Quantity})
 		if err != nil {
 			return err
@@ -137,7 +170,12 @@ func (r *InventoryRepo) Confirm(ctx context.Context, confirmRequestID, deduction
 		if ded.Status != "LOCKED" {
 			return biz.ErrInvalidState
 		}
-		inv, err := q.ConfirmInventory(ctx, sqlc.ConfirmInventoryParams{SkuID: ded.SkuID, Quantity: ded.Quantity})
+		var inv any
+		if ded.BucketKey.Valid {
+			inv, err = q.ConfirmLockedInventory(ctx, sqlc.ConfirmLockedInventoryParams{SkuID: ded.SkuID, Quantity: ded.Quantity})
+		} else {
+			inv, err = q.ConfirmInventory(ctx, sqlc.ConfirmInventoryParams{SkuID: ded.SkuID, Quantity: ded.Quantity})
+		}
 		if err != nil {
 			return err
 		}
@@ -171,8 +209,33 @@ func (r *InventoryRepo) withTx(ctx context.Context, fn func(*sqlc.Queries) error
 	return tx.Commit()
 }
 
-func toBizInventory(i sqlc.Inventory) biz.Inventory {
-	return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, Version: i.Version}
+func toBizInventory(row any) biz.Inventory {
+	switch i := row.(type) {
+	case sqlc.CreateInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.GetInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.DeductInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.DeductLockedInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.ReleaseLockedInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.ReleaseInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.ConfirmInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.ConfirmLockedInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.EditInventoryRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.LockRedisBucketStockRow:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Available, Locked: i.Locked, Sold: i.Sold, PreLocked: i.PreLocked, Version: i.Version}
+	case sqlc.Inventory:
+		return biz.Inventory{SkuID: i.SkuID, Total: i.Total, Available: i.Sq, Locked: i.Wq, Sold: i.Oq, PreLocked: i.Lq, Version: i.Version}
+	default:
+		return biz.Inventory{}
+	}
 }
 func toBizDeduction(d sqlc.InventoryDeduction) biz.Deduction {
 	return biz.Deduction{RequestID: d.RequestID, SkuID: d.SkuID, Quantity: d.Quantity, Status: d.Status}
@@ -193,4 +256,52 @@ func wrapDBErr(err error) error {
 
 func isDuplicateKey(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "duplicate key")
+}
+
+func (r *InventoryRepo) deductFromRedisBucket(ctx context.Context, q *sqlc.Queries, requestID string, skuID, quantity int64) (biz.Inventory, biz.Deduction, bool, error) {
+	bucketKey, ok, err := r.buckets.Deduct(ctx, skuID, requestID, quantity)
+	if err != nil {
+		return biz.Inventory{}, biz.Deduction{}, false, nil
+	}
+	if !ok {
+		bucketKey, ok, err = r.lockAndDeductRedisBucket(ctx, q, requestID, skuID, quantity)
+		if err != nil {
+			return biz.Inventory{}, biz.Deduction{}, false, err
+		}
+	}
+	if !ok {
+		return biz.Inventory{}, biz.Deduction{}, false, nil
+	}
+
+	ded, err := q.InsertDeduction(ctx, sqlc.InsertDeductionParams{RequestID: requestID, SkuID: skuID, Quantity: quantity, BucketKey: sql.NullString{String: bucketKey, Valid: true}})
+	if err != nil {
+		_ = r.buckets.ReturnBucketStock(ctx, bucketKey, quantity)
+		return biz.Inventory{}, biz.Deduction{}, true, err
+	}
+	inv, err := q.GetInventory(ctx, skuID)
+	if err != nil {
+		return biz.Inventory{}, biz.Deduction{}, true, err
+	}
+	return toBizInventory(inv), toBizDeduction(ded), true, nil
+}
+
+func (r *InventoryRepo) lockAndDeductRedisBucket(ctx context.Context, q *sqlc.Queries, requestID string, skuID, quantity int64) (string, bool, error) {
+	lockQuantity := r.buckets.BucketLockSize()
+	if lockQuantity < quantity {
+		lockQuantity = quantity
+	}
+	row, err := q.LockRedisBucketStock(ctx, sqlc.LockRedisBucketStockParams{SkuID: skuID, Quantity: lockQuantity})
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	bucketNo := stableBucket(requestID, r.buckets.BucketCount())
+	bucketKey, err := r.buckets.AddBucketStock(ctx, skuID, bucketNo, row.LockedQuantity)
+	if err != nil {
+		return "", false, nil
+	}
+	bucketKey, ok, err := r.buckets.Deduct(ctx, skuID, requestID, quantity)
+	return bucketKey, ok, err
 }

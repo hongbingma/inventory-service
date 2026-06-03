@@ -12,9 +12,10 @@ import (
 type Inventory struct {
 	SkuID     int64     `json:"sku_id"`
 	Total     int64     `json:"total"`
-	Available int64     `json:"available"`
-	Locked    int64     `json:"locked"`
-	Sold      int64     `json:"sold"`
+	Sq        int64     `json:"sq"`
+	Wq        int64     `json:"wq"`
+	Oq        int64     `json:"oq"`
+	Lq        int64     `json:"lq"`
 	Version   int64     `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -26,6 +27,7 @@ type InventoryDeduction struct {
 	SkuID            int64          `json:"sku_id"`
 	Quantity         int64          `json:"quantity"`
 	Status           string         `json:"status"`
+	BucketKey        sql.NullString `json:"bucket_key"`
 	ReleaseRequestID sql.NullString `json:"release_request_id"`
 	ConfirmRequestID sql.NullString `json:"confirm_request_id"`
 	CreatedAt        time.Time      `json:"created_at"`

@@ -30,7 +30,22 @@ func main() {
 	}
 	defer db.Close()
 
-	repo := data.NewInventoryRepo(db)
+	redisBuckets, err := data.NewRedisBucketStore(ctx, data.RedisConfig{
+		Addr:             getenv("REDIS_ADDR", ""),
+		Username:         getenv("REDIS_USERNAME", ""),
+		Password:         getenv("REDIS_PASSWORD", ""),
+		DB:               getenvInt("REDIS_DB", 0),
+		BucketCount:      getenvInt("REDIS_BUCKET_COUNT", 16),
+		BucketLockSize:   int64(getenvInt("REDIS_BUCKET_LOCK_SIZE", 100)),
+		OperationTimeout: time.Duration(getenvInt("REDIS_OPERATION_TIMEOUT_MS", 50)) * time.Millisecond,
+		BucketKeyTTL:     time.Duration(getenvInt("REDIS_BUCKET_TTL_MINUTES", 30)) * time.Minute,
+	})
+	if err != nil {
+		log.Printf("redis bucket store disabled: %v", err)
+	}
+	defer redisBuckets.Close()
+
+	repo := data.NewInventoryRepoWithRedis(db, redisBuckets)
 	uc := biz.NewInventoryUsecase(repo)
 	inventorySvc := service.NewInventoryService(uc)
 	httpSrv := server.NewHTTPServer(server.HTTPConfig{Addr: getenv("HTTP_ADDR", ":8000")}, inventorySvc)

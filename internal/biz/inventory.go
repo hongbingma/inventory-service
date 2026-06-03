@@ -19,6 +19,7 @@ type Inventory struct {
 	Available int64 `json:"available"`
 	Locked    int64 `json:"locked"`
 	Sold      int64 `json:"sold"`
+	PreLocked int64 `json:"pre_locked"`
 	Version   int64 `json:"version"`
 }
 
