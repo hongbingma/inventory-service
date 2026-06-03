@@ -1,15 +1,16 @@
 # inventory-service
 
-基于 **Kratos + gRPC + HTTP + sqlc + PostgreSQL** 的库存管理微服务。接口先在 `api/inventory/v1/inventory.proto` 中定义，再由 Kratos 生成 HTTP/gRPC transport 代码，业务实现放在 `internal/service`、`internal/biz`、`internal/data`，符合 Kratos 推荐的 API / Service / Biz / Data 分层。
+基于 **Kratos + gRPC + HTTP + sqlc + PostgreSQL + Redis** 的库存管理微服务。接口先在 `api/inventory/v1/inventory.proto` 中定义，再由 Kratos 生成 HTTP/gRPC transport 代码，业务实现放在 `internal/service`、`internal/biz`、`internal/data`，符合 Kratos 推荐的 API / Service / Biz / Data 分层。
 
-实现参考了阿里云文章《库存合并扣减：一种基于分布式缓存的强一致性热点库存扣减方案》中的核心原则：库存扣减必须有明细单据、请求幂等、数据库条件更新兜底防超卖、编辑链路用版本号保护一致性。
+实现参考了阿里云文章《库存合并扣减：一种基于分布式缓存的强一致性热点库存扣减方案》中的核心原则：库存扣减必须有明细单据、请求幂等、数据库条件更新兜底防超卖、Redis 分桶预锁热点库存、编辑链路用版本号保护一致性。
 
 ## 生产可用性设计
 
-- **防超卖**：扣减使用单条 SQL 条件更新：`available >= quantity` 时才将 `available` 转入 `locked`，依赖 PostgreSQL 行锁与原子更新保证并发安全。
+- **字段模型对齐**：库存表使用 `sq`（可售库存）、`wq`（预扣库存）、`oq`（占用/已售库存）和 `lq`（Redis 分桶预锁库存）；`lq` 只增加预锁量、不减少 `sq`，展示可售仍看 `sq`。
+- **防超卖**：DB 直扣使用 `sq - lq >= quantity`，Redis 命中时先扣分桶并写明细，支付确认再将 `lq` 合并落库为 `oq`，依赖 PostgreSQL 行锁、Redis Lua 原子扣减与明细幂等共同保证并发安全。
 - **幂等**：下单扣减以 `request_id` 唯一约束去重；取消返还/支付确认会锁定原扣减单据并按状态流转，重复调用不会重复加库存或重复计入已售。
-- **一致性**：库存表约束 `total = available + locked + sold`；编辑接口要求 `expected_version`，且新总库存必须大于等于 `locked + sold`。
-- **明细单据**：`inventory_deductions` 记录扣减快照与生命周期，支持订单取消返还库存、支付后确认已售。
+- **一致性**：库存表约束 `total = sq + wq + oq` 且 `lq <= sq`；编辑接口要求 `expected_version`，且新总库存必须大于等于 `wq + oq`。
+- **明细单据**：`inventory_deductions` 记录扣减快照、Redis `bucket_key` 与生命周期，支持订单取消返还库存、支付后确认已售。
 - **双协议**：同一套 protobuf 服务同时注册到 Kratos HTTP 和 gRPC server，对外提供 REST/JSON 与 gRPC 两种访问方式。
 - **可观测/部署**：提供 `/healthz`，数据库连接池参数可通过环境变量配置，包含 Dockerfile、docker-compose 和迁移 SQL。
 
@@ -20,7 +21,7 @@ api/inventory/v1/          # protobuf IDL 以及 Kratos HTTP/gRPC 生成代码
 cmd/inventory-service/     # 服务启动入口
 internal/service/          # Kratos service 实现，负责协议 DTO 与业务模型转换
 internal/biz/              # 领域用例和领域错误
-internal/data/             # PostgreSQL 仓储、事务与 sqlc 查询封装
+internal/data/             # PostgreSQL/Redis 仓储、事务与 sqlc 查询封装
 internal/server/           # Kratos HTTP/gRPC server 注册
 ```
 
@@ -36,7 +37,7 @@ curl -X POST http://localhost:8000/v1/inventories \
 
 ### 1. 库存扣减
 
-用户下单时调用。成功后库存从 `available` 转入 `locked`，等待后续支付确认或取消返还。
+用户下单时调用。热点 SKU 优先走 Redis 分桶扣减并写入扣减明细，避免每次下单都更新同一条库存热点行；支付确认时再将预锁库存合并落库为 `oq`。Redis 不可用或分桶不足时自动降级为 DB 条件扣减（`sq` 转入 `wq`）。
 
 ```bash
 curl -X POST http://localhost:8000/v1/inventories/deduct \
@@ -99,11 +100,11 @@ grpcurl -plaintext \
 docker compose up --build
 ```
 
-或连接已有 PostgreSQL：
+或连接已有 PostgreSQL/Redis（`REDIS_ADDR` 留空则禁用 Redis 分桶并降级 DB 扣减）：
 
 ```bash
 psql "$DATABASE_DSN" -f migrations/001_init.sql
-HTTP_ADDR=:8000 GRPC_ADDR=:9000 DATABASE_DSN="$DATABASE_DSN" go run ./cmd/inventory-service
+HTTP_ADDR=:8000 GRPC_ADDR=:9000 DATABASE_DSN="$DATABASE_DSN" REDIS_ADDR=127.0.0.1:6379 go run ./cmd/inventory-service
 ```
 
 ## 代码生成

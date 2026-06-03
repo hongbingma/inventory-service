@@ -8,16 +8,17 @@ package sqlc
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 const confirmInventory = `-- name: ConfirmInventory :one
 UPDATE inventories
-SET locked = locked - $2,
-    sold = sold + $2,
+SET wq = wq - $2,
+    oq = oq + $2,
     version = version + 1,
     updated_at = now()
-WHERE sku_id = $1 AND locked >= $2
-RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at
+WHERE sku_id = $1 AND wq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
 `
 
 type ConfirmInventoryParams struct {
@@ -25,15 +26,73 @@ type ConfirmInventoryParams struct {
 	Quantity int64 `json:"quantity"`
 }
 
-func (q *Queries) ConfirmInventory(ctx context.Context, arg ConfirmInventoryParams) (Inventory, error) {
+type ConfirmInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) ConfirmInventory(ctx context.Context, arg ConfirmInventoryParams) (ConfirmInventoryRow, error) {
 	row := q.db.QueryRowContext(ctx, confirmInventory, arg.SkuID, arg.Quantity)
-	var i Inventory
+	var i ConfirmInventoryRow
 	err := row.Scan(
 		&i.SkuID,
 		&i.Total,
 		&i.Available,
 		&i.Locked,
 		&i.Sold,
+		&i.PreLocked,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const confirmLockedInventory = `-- name: ConfirmLockedInventory :one
+UPDATE inventories
+SET sq = sq - $2,
+    lq = lq - $2,
+    oq = oq + $2,
+    version = version + 1,
+    updated_at = now()
+WHERE sku_id = $1 AND lq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
+`
+
+type ConfirmLockedInventoryParams struct {
+	SkuID    int64 `json:"sku_id"`
+	Quantity int64 `json:"quantity"`
+}
+
+type ConfirmLockedInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) ConfirmLockedInventory(ctx context.Context, arg ConfirmLockedInventoryParams) (ConfirmLockedInventoryRow, error) {
+	row := q.db.QueryRowContext(ctx, confirmLockedInventory, arg.SkuID, arg.Quantity)
+	var i ConfirmLockedInventoryRow
+	err := row.Scan(
+		&i.SkuID,
+		&i.Total,
+		&i.Available,
+		&i.Locked,
+		&i.Sold,
+		&i.PreLocked,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -42,15 +101,16 @@ func (q *Queries) ConfirmInventory(ctx context.Context, arg ConfirmInventoryPara
 }
 
 const createInventory = `-- name: CreateInventory :one
-INSERT INTO inventories (sku_id, total, available, locked, sold)
-VALUES ($1, $2, $2, 0, 0)
+INSERT INTO inventories (sku_id, total, sq, wq, oq, lq)
+VALUES ($1, $2, $2, 0, 0, 0)
 ON CONFLICT (sku_id) DO UPDATE
 SET total = EXCLUDED.total,
-    available = EXCLUDED.total - inventories.locked - inventories.sold,
+    sq = EXCLUDED.total - inventories.wq - inventories.oq,
+    lq = LEAST(inventories.lq, EXCLUDED.total - inventories.wq - inventories.oq),
     version = inventories.version + 1,
     updated_at = now()
-WHERE EXCLUDED.total >= inventories.locked + inventories.sold
-RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at
+WHERE EXCLUDED.total >= inventories.wq + inventories.oq
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
 `
 
 type CreateInventoryParams struct {
@@ -58,15 +118,28 @@ type CreateInventoryParams struct {
 	Total int64 `json:"total"`
 }
 
-func (q *Queries) CreateInventory(ctx context.Context, arg CreateInventoryParams) (Inventory, error) {
+type CreateInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) CreateInventory(ctx context.Context, arg CreateInventoryParams) (CreateInventoryRow, error) {
 	row := q.db.QueryRowContext(ctx, createInventory, arg.SkuID, arg.Total)
-	var i Inventory
+	var i CreateInventoryRow
 	err := row.Scan(
 		&i.SkuID,
 		&i.Total,
 		&i.Available,
 		&i.Locked,
 		&i.Sold,
+		&i.PreLocked,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -76,12 +149,12 @@ func (q *Queries) CreateInventory(ctx context.Context, arg CreateInventoryParams
 
 const deductInventory = `-- name: DeductInventory :one
 UPDATE inventories
-SET available = available - $2,
-    locked = locked + $2,
+SET sq = sq - $2,
+    wq = wq + $2,
     version = version + 1,
     updated_at = now()
-WHERE sku_id = $1 AND available >= $2
-RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at
+WHERE sku_id = $1 AND sq - lq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
 `
 
 type DeductInventoryParams struct {
@@ -89,15 +162,73 @@ type DeductInventoryParams struct {
 	Quantity int64 `json:"quantity"`
 }
 
-func (q *Queries) DeductInventory(ctx context.Context, arg DeductInventoryParams) (Inventory, error) {
+type DeductInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) DeductInventory(ctx context.Context, arg DeductInventoryParams) (DeductInventoryRow, error) {
 	row := q.db.QueryRowContext(ctx, deductInventory, arg.SkuID, arg.Quantity)
-	var i Inventory
+	var i DeductInventoryRow
 	err := row.Scan(
 		&i.SkuID,
 		&i.Total,
 		&i.Available,
 		&i.Locked,
 		&i.Sold,
+		&i.PreLocked,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deductLockedInventory = `-- name: DeductLockedInventory :one
+UPDATE inventories
+SET sq = sq - $2,
+    lq = lq - $2,
+    wq = wq + $2,
+    version = version + 1,
+    updated_at = now()
+WHERE sku_id = $1 AND lq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
+`
+
+type DeductLockedInventoryParams struct {
+	SkuID    int64 `json:"sku_id"`
+	Quantity int64 `json:"quantity"`
+}
+
+type DeductLockedInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) DeductLockedInventory(ctx context.Context, arg DeductLockedInventoryParams) (DeductLockedInventoryRow, error) {
+	row := q.db.QueryRowContext(ctx, deductLockedInventory, arg.SkuID, arg.Quantity)
+	var i DeductLockedInventoryRow
+	err := row.Scan(
+		&i.SkuID,
+		&i.Total,
+		&i.Available,
+		&i.Locked,
+		&i.Sold,
+		&i.PreLocked,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -108,13 +239,14 @@ func (q *Queries) DeductInventory(ctx context.Context, arg DeductInventoryParams
 const editInventory = `-- name: EditInventory :one
 UPDATE inventories
 SET total = $2,
-    available = $2 - locked - sold,
+    sq = $2 - wq - oq,
+    lq = LEAST(lq, $2 - wq - oq),
     version = version + 1,
     updated_at = now()
 WHERE sku_id = $1
   AND version = $3
-  AND $2 >= locked + sold
-RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at
+  AND $2 >= wq + oq
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
 `
 
 type EditInventoryParams struct {
@@ -123,15 +255,28 @@ type EditInventoryParams struct {
 	Version int64 `json:"version"`
 }
 
-func (q *Queries) EditInventory(ctx context.Context, arg EditInventoryParams) (Inventory, error) {
+type EditInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) EditInventory(ctx context.Context, arg EditInventoryParams) (EditInventoryRow, error) {
 	row := q.db.QueryRowContext(ctx, editInventory, arg.SkuID, arg.Total, arg.Version)
-	var i Inventory
+	var i EditInventoryRow
 	err := row.Scan(
 		&i.SkuID,
 		&i.Total,
 		&i.Available,
 		&i.Locked,
 		&i.Sold,
+		&i.PreLocked,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -140,7 +285,7 @@ func (q *Queries) EditInventory(ctx context.Context, arg EditInventoryParams) (I
 }
 
 const getDeductionByRequestID = `-- name: GetDeductionByRequestID :one
-SELECT id, request_id, sku_id, quantity, status, release_request_id, confirm_request_id, created_at, updated_at
+SELECT id, request_id, sku_id, quantity, status, bucket_key, release_request_id, confirm_request_id, created_at, updated_at
 FROM inventory_deductions
 WHERE request_id = $1
 `
@@ -154,6 +299,7 @@ func (q *Queries) GetDeductionByRequestID(ctx context.Context, requestID string)
 		&i.SkuID,
 		&i.Quantity,
 		&i.Status,
+		&i.BucketKey,
 		&i.ReleaseRequestID,
 		&i.ConfirmRequestID,
 		&i.CreatedAt,
@@ -163,20 +309,33 @@ func (q *Queries) GetDeductionByRequestID(ctx context.Context, requestID string)
 }
 
 const getInventory = `-- name: GetInventory :one
-SELECT sku_id, total, available, locked, sold, version, created_at, updated_at
+SELECT sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
 FROM inventories
 WHERE sku_id = $1
 `
 
-func (q *Queries) GetInventory(ctx context.Context, skuID int64) (Inventory, error) {
+type GetInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) GetInventory(ctx context.Context, skuID int64) (GetInventoryRow, error) {
 	row := q.db.QueryRowContext(ctx, getInventory, skuID)
-	var i Inventory
+	var i GetInventoryRow
 	err := row.Scan(
 		&i.SkuID,
 		&i.Total,
 		&i.Available,
 		&i.Locked,
 		&i.Sold,
+		&i.PreLocked,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -185,19 +344,25 @@ func (q *Queries) GetInventory(ctx context.Context, skuID int64) (Inventory, err
 }
 
 const insertDeduction = `-- name: InsertDeduction :one
-INSERT INTO inventory_deductions (request_id, sku_id, quantity, status)
-VALUES ($1, $2, $3, 'LOCKED')
-RETURNING id, request_id, sku_id, quantity, status, release_request_id, confirm_request_id, created_at, updated_at
+INSERT INTO inventory_deductions (request_id, sku_id, quantity, status, bucket_key)
+VALUES ($1, $2, $3, 'LOCKED', $4)
+RETURNING id, request_id, sku_id, quantity, status, bucket_key, release_request_id, confirm_request_id, created_at, updated_at
 `
 
 type InsertDeductionParams struct {
-	RequestID string `json:"request_id"`
-	SkuID     int64  `json:"sku_id"`
-	Quantity  int64  `json:"quantity"`
+	RequestID string         `json:"request_id"`
+	SkuID     int64          `json:"sku_id"`
+	Quantity  int64          `json:"quantity"`
+	BucketKey sql.NullString `json:"bucket_key"`
 }
 
 func (q *Queries) InsertDeduction(ctx context.Context, arg InsertDeductionParams) (InventoryDeduction, error) {
-	row := q.db.QueryRowContext(ctx, insertDeduction, arg.RequestID, arg.SkuID, arg.Quantity)
+	row := q.db.QueryRowContext(ctx, insertDeduction,
+		arg.RequestID,
+		arg.SkuID,
+		arg.Quantity,
+		arg.BucketKey,
+	)
 	var i InventoryDeduction
 	err := row.Scan(
 		&i.ID,
@@ -205,6 +370,7 @@ func (q *Queries) InsertDeduction(ctx context.Context, arg InsertDeductionParams
 		&i.SkuID,
 		&i.Quantity,
 		&i.Status,
+		&i.BucketKey,
 		&i.ReleaseRequestID,
 		&i.ConfirmRequestID,
 		&i.CreatedAt,
@@ -214,7 +380,7 @@ func (q *Queries) InsertDeduction(ctx context.Context, arg InsertDeductionParams
 }
 
 const lockDeductionByRequestID = `-- name: LockDeductionByRequestID :one
-SELECT id, request_id, sku_id, quantity, status, release_request_id, confirm_request_id, created_at, updated_at
+SELECT id, request_id, sku_id, quantity, status, bucket_key, release_request_id, confirm_request_id, created_at, updated_at
 FROM inventory_deductions
 WHERE request_id = $1
 FOR UPDATE
@@ -229,6 +395,7 @@ func (q *Queries) LockDeductionByRequestID(ctx context.Context, requestID string
 		&i.SkuID,
 		&i.Quantity,
 		&i.Status,
+		&i.BucketKey,
 		&i.ReleaseRequestID,
 		&i.ConfirmRequestID,
 		&i.CreatedAt,
@@ -237,11 +404,56 @@ func (q *Queries) LockDeductionByRequestID(ctx context.Context, requestID string
 	return i, err
 }
 
+const lockRedisBucketStock = `-- name: LockRedisBucketStock :one
+UPDATE inventories
+SET lq = lq + $2,
+    version = version + 1,
+    updated_at = now()
+WHERE sku_id = $1 AND sq - lq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at, $2::bigint AS locked_quantity
+`
+
+type LockRedisBucketStockParams struct {
+	SkuID    int64 `json:"sku_id"`
+	Quantity int64 `json:"quantity"`
+}
+
+type LockRedisBucketStockRow struct {
+	SkuID          int64     `json:"sku_id"`
+	Total          int64     `json:"total"`
+	Available      int64     `json:"available"`
+	Locked         int64     `json:"locked"`
+	Sold           int64     `json:"sold"`
+	PreLocked      int64     `json:"pre_locked"`
+	Version        int64     `json:"version"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	LockedQuantity int64     `json:"locked_quantity"`
+}
+
+func (q *Queries) LockRedisBucketStock(ctx context.Context, arg LockRedisBucketStockParams) (LockRedisBucketStockRow, error) {
+	row := q.db.QueryRowContext(ctx, lockRedisBucketStock, arg.SkuID, arg.Quantity)
+	var i LockRedisBucketStockRow
+	err := row.Scan(
+		&i.SkuID,
+		&i.Total,
+		&i.Available,
+		&i.Locked,
+		&i.Sold,
+		&i.PreLocked,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LockedQuantity,
+	)
+	return i, err
+}
+
 const markDeductionConfirmed = `-- name: MarkDeductionConfirmed :one
 UPDATE inventory_deductions
 SET status = 'CONFIRMED', confirm_request_id = $2, updated_at = now()
 WHERE request_id = $1 AND status = 'LOCKED'
-RETURNING id, request_id, sku_id, quantity, status, release_request_id, confirm_request_id, created_at, updated_at
+RETURNING id, request_id, sku_id, quantity, status, bucket_key, release_request_id, confirm_request_id, created_at, updated_at
 `
 
 type MarkDeductionConfirmedParams struct {
@@ -258,6 +470,7 @@ func (q *Queries) MarkDeductionConfirmed(ctx context.Context, arg MarkDeductionC
 		&i.SkuID,
 		&i.Quantity,
 		&i.Status,
+		&i.BucketKey,
 		&i.ReleaseRequestID,
 		&i.ConfirmRequestID,
 		&i.CreatedAt,
@@ -270,7 +483,7 @@ const markDeductionReleased = `-- name: MarkDeductionReleased :one
 UPDATE inventory_deductions
 SET status = 'RELEASED', release_request_id = $2, updated_at = now()
 WHERE request_id = $1 AND status = 'LOCKED'
-RETURNING id, request_id, sku_id, quantity, status, release_request_id, confirm_request_id, created_at, updated_at
+RETURNING id, request_id, sku_id, quantity, status, bucket_key, release_request_id, confirm_request_id, created_at, updated_at
 `
 
 type MarkDeductionReleasedParams struct {
@@ -287,6 +500,7 @@ func (q *Queries) MarkDeductionReleased(ctx context.Context, arg MarkDeductionRe
 		&i.SkuID,
 		&i.Quantity,
 		&i.Status,
+		&i.BucketKey,
 		&i.ReleaseRequestID,
 		&i.ConfirmRequestID,
 		&i.CreatedAt,
@@ -297,12 +511,12 @@ func (q *Queries) MarkDeductionReleased(ctx context.Context, arg MarkDeductionRe
 
 const releaseInventory = `-- name: ReleaseInventory :one
 UPDATE inventories
-SET available = available + $2,
-    locked = locked - $2,
+SET sq = sq + $2,
+    wq = wq - $2,
     version = version + 1,
     updated_at = now()
-WHERE sku_id = $1 AND locked >= $2
-RETURNING sku_id, total, available, locked, sold, version, created_at, updated_at
+WHERE sku_id = $1 AND wq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
 `
 
 type ReleaseInventoryParams struct {
@@ -310,15 +524,71 @@ type ReleaseInventoryParams struct {
 	Quantity int64 `json:"quantity"`
 }
 
-func (q *Queries) ReleaseInventory(ctx context.Context, arg ReleaseInventoryParams) (Inventory, error) {
+type ReleaseInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) ReleaseInventory(ctx context.Context, arg ReleaseInventoryParams) (ReleaseInventoryRow, error) {
 	row := q.db.QueryRowContext(ctx, releaseInventory, arg.SkuID, arg.Quantity)
-	var i Inventory
+	var i ReleaseInventoryRow
 	err := row.Scan(
 		&i.SkuID,
 		&i.Total,
 		&i.Available,
 		&i.Locked,
 		&i.Sold,
+		&i.PreLocked,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const releaseLockedInventory = `-- name: ReleaseLockedInventory :one
+UPDATE inventories
+SET lq = lq - $2,
+    version = version + 1,
+    updated_at = now()
+WHERE sku_id = $1 AND lq >= $2
+RETURNING sku_id, total, sq AS available, wq AS locked, oq AS sold, lq AS pre_locked, version, created_at, updated_at
+`
+
+type ReleaseLockedInventoryParams struct {
+	SkuID    int64 `json:"sku_id"`
+	Quantity int64 `json:"quantity"`
+}
+
+type ReleaseLockedInventoryRow struct {
+	SkuID     int64     `json:"sku_id"`
+	Total     int64     `json:"total"`
+	Available int64     `json:"available"`
+	Locked    int64     `json:"locked"`
+	Sold      int64     `json:"sold"`
+	PreLocked int64     `json:"pre_locked"`
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (q *Queries) ReleaseLockedInventory(ctx context.Context, arg ReleaseLockedInventoryParams) (ReleaseLockedInventoryRow, error) {
+	row := q.db.QueryRowContext(ctx, releaseLockedInventory, arg.SkuID, arg.Quantity)
+	var i ReleaseLockedInventoryRow
+	err := row.Scan(
+		&i.SkuID,
+		&i.Total,
+		&i.Available,
+		&i.Locked,
+		&i.Sold,
+		&i.PreLocked,
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
